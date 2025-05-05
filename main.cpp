@@ -144,20 +144,156 @@ public:
 
 private:
     void handleArrival(const Event& e) {
-        // TODO
+
+	    outputEvents.push_back(e);
+
+	    auto& name = e.clientName;
+	    auto it = clients.find(name);
+
+	    if (e.time < openTime) {
+		addError(e, "NotOpenYet");
+	        return;
+    	    }	
+
+		if (it != clients.end() && it->second.inClub) {
+        		addError(e, "YouShallNotPass");
+        	return;
+    	}
+
+	    // Добавляем клиента
+    	clients[name] = Client{name, true, -1, Time()};
     }
+
+    
 
     void handleSit(const Event& e) {
-        // TODO
+        outputEvents.push_back(e);
+        auto& name = e.clientName;
+        int tableIdx = e.table - 1;
+
+        if (clients.find(name) == clients.end() || !clients[name].inClub) {
+            addError(e, "ClientUnknown");
+            return;
+        }
+
+        if (tableIdx < 0 || tableIdx >= tableCount) {
+            addError(e, "PlaceIsBusy");
+            return;
+        }
+
+        if (!tables[tableIdx].occupiedBy.empty()) {
+            if (tables[tableIdx].occupiedBy == name) {
+                addError(e, "PlaceIsBusy");
+                return;
+            }
+            addError(e, "PlaceIsBusy");
+            return;
+        }
+
+        // Освобождаем текущий стол, если сидит
+        Client& client = clients[name];
+        if (client.table != -1) {
+            int oldIdx = client.table;
+            int minutes = tables[oldIdx].id >= 1 ? tables[oldIdx].id : 0;
+            int sessionTime = client.sitTime.diffMinutes(e.time);
+            tables[oldIdx].busyMinutes += sessionTime;
+            tables[oldIdx].profit += ((sessionTime + 59) / 60) * pricePerHour;
+            tables[oldIdx].occupiedBy.clear();
+        }
+
+        // Занимаем новый стол
+        client.table = tableIdx;
+        client.sitTime = e.time;
+        tables[tableIdx].occupiedBy = name;
+
+        // Если клиент был в очереди — убираем
+        queue<string> newQueue;
+        while (!waitQueue.empty()) {
+            string qname = waitQueue.front(); waitQueue.pop();
+            if (qname != name) newQueue.push(qname);
+        }
+        waitQueue = newQueue;
     }
 
+
     void handleWait(const Event& e) {
-        // TODO
+          outputEvents.push_back(e);
+        auto& name = e.clientName;
+
+        if (clients.find(name) == clients.end() || !clients[name].inClub) {
+            addError(e, "ClientUnknown");
+            return;
+        }
+
+    // Если есть свободный стол
+        bool hasFree = false;
+        for (auto& t : tables) {
+            if (t.occupiedBy.empty()) {
+                hasFree = true;
+                break;
+            }
+        }
+        if (hasFree) {
+            addError(e, "ICanWaitNoLonger!");
+            return;
+        }
+
+    // Если очередь переполнена
+        if ((int)waitQueue.size() >= tableCount) {
+            Event forcedLeave;
+            forcedLeave.time = e.time;
+            forcedLeave.type = FORCE_LEAVE;
+            forcedLeave.clientName = name;
+            outputEvents.push_back(forcedLeave);
+
+            clients[name].inClub = false;
+            return;
+        }
+
+    // Ставим в очередь
+        waitQueue.push(name);
     }
 
     void handleLeave(const Event& e) {
-        // TODO
-    }
+        outputEvents.push_back(e);
+        auto& name = e.clientName;
+
+        if (clients.find(name) == clients.end() || !clients[name].inClub) {
+            addError(e, "ClientUnknown");
+            return;
+        }
+
+        Client& client = clients[name];
+        if (client.table != -1) {
+            int tableIdx = client.table;
+            int sessionTime = client.sitTime.diffMinutes(e.time);
+            tables[tableIdx].busyMinutes += sessionTime;
+            tables[tableIdx].profit += ((sessionTime + 59) / 60) * pricePerHour;
+            tables[tableIdx].occupiedBy.clear();
+
+            // Освободили стол — посадим из очереди
+            if (!waitQueue.empty()) {
+                string next = waitQueue.front();
+                waitQueue.pop();
+
+                Event autoSit;
+                autoSit.time = e.time;
+                autoSit.type = AUTO_SIT;
+                autoSit.clientName = next;
+                autoSit.table = tableIdx + 1;
+                outputEvents.push_back(autoSit);
+
+                clients[next].table = tableIdx;
+                clients[next].sitTime = e.time;
+                tables[tableIdx].occupiedBy = next;
+            }
+        }
+
+        client.table = -1;
+        client.inClub = false;
+    }   
+
+
 
     void addError(const Event& cause, const string& msg) {
         outputEvents.push_back(cause);
